@@ -9,6 +9,7 @@ import csv
 import os
 import re
 import time
+from pathlib import Path
 from datetime import datetime
 import requests
 from requests.adapters import HTTPAdapter
@@ -134,41 +135,125 @@ def generate_random_password(length=None):
 
 def save_to_txt(email: str, password: str = None, status="已注册"):
     """
-    保存账号信息到 TXT 文件，格式: 邮箱----密码----时间----状态
-    如果账号已存在，则更新其信息
+    保存账号信息到 TXT 文件，格式: 邮箱 | 密码 | 状态 | 注册时间
+    如果账号已存在，则更新其信息。
     """
     try:
-        file_path = os.path.join(os.path.dirname(__file__), TXT_FILE)
-        current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+        def resolve_accounts_file_path() -> Path:
+            path = Path(TXT_FILE)
+            if path.is_absolute():
+                return path
+            return (Path(__file__).resolve().parent / path)
+
+        def normalize_time_str(value: str) -> str:
+            value = (value or "").strip()
+            if not value:
+                return ""
+            # 新格式（推荐）：2026-01-06 09:45:00
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
+                try:
+                    return datetime.strptime(value, fmt).strftime("%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    pass
+            # 旧格式：20260206_015747
+            try:
+                return datetime.strptime(value, "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return value
+
+        def parse_account_line(line: str) -> dict | None:
+            raw = (line or "").strip()
+            if not raw or raw.startswith("#"):
+                return None
+
+            # 新格式：邮箱 | 密码 | 状态 | 时间
+            if "|" in raw:
+                parts = [p.strip() for p in raw.split("|", maxsplit=3)]
+                if len(parts) < 2:
+                    return None
+                parsed_email = parts[0]
+                if "@" not in parsed_email:
+                    return None
+                parsed_password = parts[1] or "N/A"
+                parsed_status = parts[2] if len(parts) > 2 else ""
+                parsed_time = normalize_time_str(parts[3] if len(parts) > 3 else "")
+                return {
+                    "email": parsed_email,
+                    "password": parsed_password,
+                    "status": parsed_status,
+                    "time": parsed_time,
+                }
+
+            # 旧格式：邮箱----密码----时间----状态
+            if "----" in raw:
+                parts = [p.strip() for p in raw.split("----", maxsplit=3)]
+                if len(parts) < 2:
+                    return None
+                parsed_email = parts[0]
+                if "@" not in parsed_email:
+                    return None
+                parsed_password = parts[1] or "N/A"
+                parsed_time = normalize_time_str(parts[2] if len(parts) > 2 else "")
+                parsed_status = parts[3] if len(parts) > 3 else ""
+                return {
+                    "email": parsed_email,
+                    "password": parsed_password,
+                    "status": parsed_status,
+                    "time": parsed_time,
+                }
+
+            return None
+
+        def format_account_line(line_email: str, line_password: str, line_status: str, line_time: str) -> str:
+            safe_password = (line_password or "N/A").strip() or "N/A"
+            safe_status = (line_status or "").strip()
+            safe_time = normalize_time_str(line_time) if line_time else ""
+            return f"{line_email.strip()} | {safe_password} | {safe_status} | {safe_time}\n"
+
+        file_path = resolve_accounts_file_path()
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         # 读取现有内容
-        lines = []
-        if os.path.exists(file_path):
-            with open(file_path, "r", encoding="utf-8") as f:
+        lines: list[str] = []
+        if file_path.exists():
+            with file_path.open("r", encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
         
         # 检查是否已存在，存在则更新
         found = False
-        new_line_content = f"{email}----{password if password else 'N/A'}----{current_date}----{status}\n"
+        new_line_content = format_account_line(email, password or "N/A", status, current_date)
         
-        for i, line in enumerate(lines):
-            # 检查邮箱是否在行首，避免匹配到邮箱作为密码或状态的一部分
-            if line.startswith(f"{email}----"):
-                parts = line.strip().split("----")
-                current_password_in_file = parts[1] if len(parts) > 1 else 'N/A'
-                
-                # 如果传入了新密码则用新密码，否则沿用旧密码
-                final_password = password if password else current_password_in_file
-                lines[i] = f"{email}----{final_password}----{current_date}----{status}\n"
+        normalized_lines: list[str] = []
+        for line in lines:
+            parsed = parse_account_line(line)
+            if not parsed:
+                normalized_lines.append(line)
+                continue
+
+            if parsed["email"] == email:
+                final_password = password or parsed["password"] or "N/A"
+                normalized_lines.append(format_account_line(email, final_password, status, current_date))
                 found = True
-                break
+                continue
+
+            normalized_lines.append(
+                format_account_line(
+                    parsed["email"],
+                    parsed["password"],
+                    parsed["status"],
+                    parsed["time"],
+                )
+            )
         
         if not found:
-            lines.append(new_line_content)
+            normalized_lines.append(new_line_content)
             
         # 写回文件
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
+        tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
+            f.writelines(normalized_lines)
+        os.replace(tmp_path, file_path)
             
         print(f"💾 账号状态已更新: {status}")
         
@@ -458,5 +543,4 @@ def generate_billing_info(country="JP"):
     print(f"   州/省: {billing_info['state']}, 邮编: {billing_info['zip']}")
     
     return billing_info
-
 

@@ -73,7 +73,7 @@ def create_driver(headless=False):
         options.add_argument("--lang=zh-CN,zh;q=0.9,en;q=0.8")
     
     # 使用自定义的 SafeChrome (注意: 传入 real_headless=False)
-    driver = SafeChrome(options=options, use_subprocess=True, headless=real_headless)
+    driver = SafeChrome(options=options, use_subprocess=True, headless=real_headless, version_main=144)
     
     # === 深度伪装 (针对 Headless 模式) ===
     if headless:

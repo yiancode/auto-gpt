@@ -17,6 +17,15 @@ from config import cfg
 app = Flask(__name__, static_url_path='')
 
 # ==========================================
+# 📁 文件路径工具
+# ==========================================
+def resolve_accounts_file_path() -> str:
+    path = cfg.files.accounts_file
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.path.dirname(__file__), path)
+
+# ==========================================
 # 🔧 状态管理与日志捕获
 # ==========================================
 
@@ -173,9 +182,10 @@ def index():
 def get_status():
     # 获取库存数
     total_inventory = 0
-    if os.path.exists(cfg.files.accounts_file):
+    accounts_path = resolve_accounts_file_path()
+    if os.path.exists(accounts_path):
         try:
-            with open(cfg.files.accounts_file, 'r', encoding='utf-8') as f:
+            with open(accounts_path, 'r', encoding='utf-8', errors='replace') as f:
                 total_inventory = sum(1 for line in f if '@' in line)
         except:
             pass
@@ -210,19 +220,64 @@ def stop_task():
 
 @app.route('/api/accounts')
 def get_accounts():
-    accounts = []
-    if os.path.exists(cfg.files.accounts_file):
+    def normalize_time_str(value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            return ""
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
+            try:
+                return datetime.strptime(value, fmt).strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
         try:
-            with open(cfg.files.accounts_file, 'r', encoding='utf-8') as f:
+            return datetime.strptime(value, "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return value
+
+    def parse_account_line(line: str) -> dict | None:
+        raw = (line or "").strip()
+        if not raw or raw.startswith("#"):
+            return None
+
+        if "|" in raw:
+            parts = [p.strip() for p in raw.split("|", maxsplit=3)]
+            if len(parts) < 2:
+                return None
+            email = parts[0]
+            if "@" not in email:
+                return None
+            return {
+                "email": email,
+                "password": parts[1],
+                "status": parts[2] if len(parts) > 2 else "",
+                "time": normalize_time_str(parts[3] if len(parts) > 3 else ""),
+            }
+
+        if "----" in raw:
+            parts = [p.strip() for p in raw.split("----", maxsplit=3)]
+            if len(parts) < 2:
+                return None
+            email = parts[0]
+            if "@" not in email:
+                return None
+            return {
+                "email": email,
+                "password": parts[1],
+                "status": parts[3] if len(parts) > 3 else "",
+                "time": normalize_time_str(parts[2] if len(parts) > 2 else ""),
+            }
+
+        return None
+
+    accounts = []
+    accounts_path = resolve_accounts_file_path()
+    if os.path.exists(accounts_path):
+        try:
+            with open(accounts_path, 'r', encoding='utf-8', errors='replace') as f:
                 for line in f:
-                    parts = line.strip().split('|')
-                    if len(parts) >= 2:
-                        accounts.append({
-                            "email": parts[0].strip(),
-                            "password": parts[1].strip(),
-                            "status": parts[2].strip() if len(parts) > 2 else "",
-                            "time": parts[3].strip() if len(parts) > 3 else ""
-                        })
+                    parsed = parse_account_line(line)
+                    if parsed:
+                        accounts.append(parsed)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     # 反转列表，最新的在前
@@ -230,7 +285,7 @@ def get_accounts():
 
 if __name__ == '__main__':
     from waitress import serve
-    print("🌐 Web Server started at http://localhost:5000")
+    print("🌐 Web Server started at http://localhost:5001")
     # 使用生产级服务器 Waitress
     # threads=6 支持并发：前端页面 + API轮询 + MJPEG流 + 后台任务
-    serve(app, host='0.0.0.0', port=5000, threads=6)
+    serve(app, host='0.0.0.0', port=5001, threads=6)
