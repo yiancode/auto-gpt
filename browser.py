@@ -4,6 +4,9 @@
 """
 
 import time
+import re
+import sys
+import subprocess
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -42,6 +45,34 @@ class SafeChrome(uc.Chrome):
             pass
 
 
+def detect_chrome_major_version():
+    """
+    检测本机 Google Chrome 主版本号。
+
+    返回:
+        int | None: 主版本号，检测失败时返回 None
+    """
+    candidates = [
+        ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--version"],
+        ["google-chrome", "--version"],
+        ["chrome", "--version"],
+        ["chromium", "--version"],
+        ["chromium-browser", "--version"],
+    ]
+
+    for cmd in candidates:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=True)
+            output = (result.stdout or result.stderr or "").strip()
+            match = re.search(r"(\d+)\.", output)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            continue
+
+    return None
+
+
 def create_driver(headless=False):
     """
     创建 undetected Chrome 浏览器驱动
@@ -72,8 +103,19 @@ def create_driver(headless=False):
         # 仍然可以加一些伪装，虽然不是必需的，因为已经是真浏览器了
         options.add_argument("--lang=zh-CN,zh;q=0.9,en;q=0.8")
     
+    version_main = detect_chrome_major_version()
+    if version_main:
+        print(f"🔍 检测到本机 Chrome 主版本: {version_main}")
+    else:
+        print("⚠️ 未检测到本机 Chrome 版本，将使用 undetected-chromedriver 自动匹配")
+
     # 使用自定义的 SafeChrome (注意: 传入 real_headless=False)
-    driver = SafeChrome(options=options, use_subprocess=True, headless=real_headless, version_main=144)
+    driver = SafeChrome(
+        options=options,
+        use_subprocess=True,
+        headless=real_headless,
+        version_main=version_main,
+    )
     
     # === 深度伪装 (针对 Headless 模式) ===
     if headless:
@@ -133,6 +175,128 @@ def create_driver(headless=False):
         })
 
     return driver
+
+
+def clear_input_and_type(element, value, delay=0.05):
+    """
+    更稳地清空并输入文本，兼容 macOS / Windows 快捷键差异。
+    """
+    select_all = Keys.COMMAND if sys.platform == "darwin" else Keys.CONTROL
+    element.click()
+    time.sleep(0.2)
+    element.send_keys(select_all, "a")
+    time.sleep(0.1)
+    element.send_keys(Keys.BACKSPACE)
+    time.sleep(0.1)
+    type_slowly(element, value, delay=delay)
+
+
+def set_input_value(driver, element, value):
+    """
+    直接通过 JS 赋值，并补发事件，适配 React/Next 输入框。
+    """
+    driver.execute_script(
+        """
+        const el = arguments[0];
+        const value = arguments[1];
+        el.focus();
+        el.value = '';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.value = value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+        """,
+        element,
+        value,
+    )
+
+
+def find_first_visible(driver, selectors, timeout=30):
+    """
+    在一组 CSS 选择器中返回第一个可见元素。
+    """
+    end_time = time.time() + timeout
+    last_error = None
+
+    while time.time() < end_time:
+        for selector in selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                for element in elements:
+                    if element.is_displayed():
+                        return element
+            except Exception as e:
+                last_error = e
+        time.sleep(0.3)
+
+    if last_error:
+        raise last_error
+    raise TimeoutError(f"未找到可见元素: {selectors}")
+
+
+def dump_visible_form_controls(driver):
+    """
+    打印当前页面可见表单控件，便于适配页面结构变化。
+    """
+    try:
+        controls = driver.execute_script(
+            """
+            const nodes = Array.from(document.querySelectorAll('input, select, textarea, [role="combobox"]'));
+            return nodes
+              .filter(el => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+              })
+              .map(el => ({
+                tag: el.tagName,
+                type: el.getAttribute('type') || '',
+                name: el.getAttribute('name') || '',
+                id: el.id || '',
+                placeholder: el.getAttribute('placeholder') || '',
+                autocomplete: el.getAttribute('autocomplete') || '',
+                ariaLabel: el.getAttribute('aria-label') || '',
+                role: el.getAttribute('role') || '',
+                outerHTML: (el.outerHTML || '').slice(0, 300)
+              }));
+            """
+        )
+        print(f"🧪 当前可见表单控件数量: {len(controls)}")
+        for idx, control in enumerate(controls[:20], start=1):
+            print(
+                f"  [{idx}] tag={control['tag']} type={control['type']} name={control['name']} "
+                f"id={control['id']} placeholder={control['placeholder']} "
+                f"autocomplete={control['autocomplete']} aria={control['ariaLabel']} role={control['role']}"
+            )
+    except Exception as e:
+        print(f"⚠️ 打印表单控件失败: {e}")
+
+
+def fill_select_value(element, value):
+    """
+    通过下拉框输入/选择值。
+    """
+    element.click()
+    time.sleep(0.2)
+    element.send_keys(str(value))
+    time.sleep(0.2)
+    element.send_keys(Keys.ENTER)
+
+
+def find_visible_elements(driver, selectors):
+    """
+    返回一组选择器匹配到的所有可见元素。
+    """
+    matched = []
+    for selector in selectors:
+        try:
+            for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                if element.is_displayed():
+                    matched.append(element)
+        except Exception:
+            continue
+    return matched
 
 
 def check_and_handle_error(driver, max_retries=None):
@@ -576,62 +740,159 @@ def fill_profile_info(driver):
     birthday_year = user_info['year']
     birthday_month = user_info['month']
     birthday_day = user_info['day']
+    age_value = str(max(18, min(99, 2026 - int(birthday_year))))
     
     try:
         # 1. 输入姓名
         print("👤 等待姓名输入框...")
-        name_input = WebDriverWait(driver, 60).until(
-            EC.visibility_of_element_located((
-                By.CSS_SELECTOR, 
-                'input[name="name"], input[autocomplete="name"]'
-            ))
+        name_input = find_first_visible(
+            driver,
+            [
+                'input[name="name"]',
+                'input[autocomplete="name"]',
+                'input[id*="name"]',
+            ],
+            timeout=60,
         )
-        name_input.clear()
-        time.sleep(0.5)
-        type_slowly(name_input, user_name)
+        clear_input_and_type(name_input, user_name)
         print(f"✅ 已输入姓名: {user_name}")
         time.sleep(1)
         
         # 2. 输入生日
         print("🎂 正在输入生日...")
         time.sleep(1)
-        
-        # 年份
-        year_input = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, '[data-type="year"]'))
+        dump_visible_form_controls(driver)
+
+        # 新版页面可能只要求输入年龄
+        age_fields = find_visible_elements(
+            driver,
+            [
+                'input[name="age"]',
+                'input[id*="age"]',
+                'input[placeholder="年龄"]',
+                'input[placeholder*="age" i]',
+                'input[aria-label*="age" i]',
+                'input[type="number"]',
+            ],
         )
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", year_input)
-        time.sleep(0.5)
-        
-        actions = ActionChains(driver)
-        actions.click(year_input).perform()
-        time.sleep(0.3)
-        year_input.send_keys(Keys.CONTROL + "a")
-        time.sleep(0.1)
-        type_slowly(year_input, birthday_year, delay=0.1)
-        time.sleep(0.5)
-        
-        # 月份
-        month_input = driver.find_element(By.CSS_SELECTOR, '[data-type="month"]')
-        actions = ActionChains(driver)
-        actions.click(month_input).perform()
-        time.sleep(0.3)
-        month_input.send_keys(Keys.CONTROL + "a")
-        time.sleep(0.1)
-        type_slowly(month_input, birthday_month, delay=0.1)
-        time.sleep(0.5)
-        
-        # 日期
-        day_input = driver.find_element(By.CSS_SELECTOR, '[data-type="day"]')
-        actions = ActionChains(driver)
-        actions.click(day_input).perform()
-        time.sleep(0.3)
-        day_input.send_keys(Keys.CONTROL + "a")
-        time.sleep(0.1)
-        type_slowly(day_input, birthday_day, delay=0.1)
-        
-        print(f"✅ 已输入生日: {birthday_year}/{birthday_month}/{birthday_day}")
-        time.sleep(1)
+        if age_fields:
+            age_input = age_fields[0]
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", age_input)
+            try:
+                set_input_value(driver, age_input, age_value)
+            except Exception:
+                clear_input_and_type(age_input, age_value, delay=0.08)
+            print(f"✅ 已输入年龄: {age_value}")
+            time.sleep(1)
+        else:
+
+            # 策略 1：单个生日输入框
+            birthday_single = find_visible_elements(
+                driver,
+                [
+                    'input[type="date"]',
+                    'input[autocomplete="bday"]',
+                    'input[name*="birth" i]',
+                    'input[name*="date" i]',
+                    'input[placeholder*="birth" i]',
+                    'input[placeholder*="date" i]',
+                    'input[aria-label*="birth" i]',
+                    'input[aria-label*="birthday" i]',
+                ],
+            )
+            if birthday_single:
+                field = birthday_single[0]
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", field)
+                date_value = f"{birthday_year}-{birthday_month}-{birthday_day}"
+                try:
+                    set_input_value(driver, field, date_value)
+                except Exception:
+                    clear_input_and_type(field, date_value, delay=0.05)
+                print(f"✅ 已输入单个生日字段: {date_value}")
+            else:
+                # 策略 2：拆分的 year/month/day
+                year_candidates = find_visible_elements(
+                    driver,
+                    [
+                        '[data-type="year"]',
+                        'input[autocomplete="bday-year"]',
+                        'input[name*="year" i]',
+                        'input[placeholder="YYYY"]',
+                        'select[name*="year" i]',
+                        '[role="combobox"][aria-label*="year" i]',
+                    ],
+                )
+                month_candidates = find_visible_elements(
+                    driver,
+                    [
+                        '[data-type="month"]',
+                        'input[autocomplete="bday-month"]',
+                        'input[name*="month" i]',
+                        'input[placeholder="MM"]',
+                        'select[name*="month" i]',
+                        '[role="combobox"][aria-label*="month" i]',
+                    ],
+                )
+                day_candidates = find_visible_elements(
+                    driver,
+                    [
+                        '[data-type="day"]',
+                        'input[autocomplete="bday-day"]',
+                        'input[name*="day" i]',
+                        'input[placeholder="DD"]',
+                        'select[name*="day" i]',
+                        '[role="combobox"][aria-label*="day" i]',
+                    ],
+                )
+
+                # 策略 3：无语义回退，拿 name 以外的前三个可见输入/选择控件
+                if not (year_candidates and month_candidates and day_candidates):
+                    generic_fields = driver.execute_script(
+                        """
+                        const nodes = Array.from(document.querySelectorAll('input, select, [role="combobox"]'));
+                        return nodes.filter(el => {
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            const isVisible = style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                            const nameLike = (el.name || el.getAttribute('autocomplete') || el.id || el.getAttribute('aria-label') || '').toLowerCase();
+                            const type = (el.getAttribute('type') || '').toLowerCase();
+                            return isVisible && !nameLike.includes('name') && !nameLike.includes('age') && type !== 'hidden';
+                        });
+                        """,
+                    )
+                    if len(generic_fields) >= 3:
+                        year_candidates = [generic_fields[0]]
+                        month_candidates = [generic_fields[1]]
+                        day_candidates = [generic_fields[2]]
+
+                if not (year_candidates and month_candidates and day_candidates):
+                    raise TimeoutError("未找到可用的年龄/生日字段")
+
+                year_input = year_candidates[0]
+                month_input = month_candidates[0]
+                day_input = day_candidates[0]
+
+                for field in (year_input, month_input, day_input):
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", field)
+                    time.sleep(0.2)
+
+                for field, value in (
+                    (year_input, birthday_year),
+                    (month_input, birthday_month),
+                    (day_input, birthday_day),
+                ):
+                    tag_name = (field.tag_name or "").lower()
+                    role = (field.get_attribute("role") or "").lower()
+                    if tag_name == "select" or role == "combobox":
+                        fill_select_value(field, value)
+                    else:
+                        try:
+                            set_input_value(driver, field, value)
+                        except Exception:
+                            clear_input_and_type(field, value, delay=0.08)
+
+                print(f"✅ 已输入生日: {birthday_year}/{birthday_month}/{birthday_day}")
+                time.sleep(1)
         
         # 3. 点击最后的继续按钮
         print("🔘 点击最终提交按钮...")
@@ -644,7 +905,7 @@ def fill_profile_info(driver):
         return True
         
     except Exception as e:
-        print(f"❌ 填写资料失败: {e}")
+        print(f"❌ 填写资料失败: {type(e).__name__}: {e}")
         return False
 
 
